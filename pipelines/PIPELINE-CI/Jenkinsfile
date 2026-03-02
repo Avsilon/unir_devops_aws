@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     environment {
-        GIT_REPO_URL    = 'https://github.com/Avsilon/unir_devops_aws.git'
+        GIT_REPO_URL    = 'github.com/Avsilon/unir_devops_aws.git'
         GIT_CREDENTIALS = 'github-token'
         ENVIRONMENT     = 'staging'
         STACK_NAME      = 'todo-list-aws-staging'
@@ -13,18 +13,17 @@ pipeline {
         stage('Get Code') {
             steps {
                 echo 'Obteniendo código de la rama develop'
-                git branch: 'develop', url: "${GIT_REPO_URL}"
+                git branch: 'develop', url: "https://${GIT_REPO_URL}"
             }
         }
         stage('Static Test') {
             steps {
                 echo 'Ejecutando análisis estático (Flake8 y Bandit) sobre src/'
                 sh '''
-                    python3 -m pip install flake8 bandit
-                    # Flake8: informe en formato pylint para el plugin Warnings Next Generation
-                    flake8 --exit-zero --format=pylint src/ > flake8-report.out
-                    # Bandit: informe en formato HTML para publicación visual
-                    bandit --exit-zero -r src/ -f html -o bandit-report.html
+                    python3 -m pip install --user flake8 bandit
+                    
+                    python3 -m flake8 --exit-zero --format=pylint src/ > flake8-report.out
+                    python3 -m bandit --exit-zero -r src/ -f html -o bandit-report.html
                 '''
             }
             post {
@@ -64,29 +63,27 @@ pipeline {
                     ).trim()
                     echo "BASE_URL: ${BASE_URL}"
                     sh """
-                        python3 -m pip install pytest requests
+                        python3 -m pip install --user pytest requests
                         export BASE_URL=${BASE_URL}
-                        pytest -s test/integration/todoApiTest.py
+                        python3 -m pytest -s test/integration/todoApiTest.py
                     """
                 }
             }
         }
         stage('Promote') {
             steps {
-                echo 'Realizando merge de develop a master'
-                sh '''
-                    git config user.email "albama4c@gmail.com"
-                    git config user.name "Avsilon"
-                    git branch -a
-                    git checkout -b develop origin/develop || true
-                    git checkout -b master origin/master
-                    git merge develop --no-edit
-                '''
+                echo 'Realizando merge de develop a main...'
                 withCredentials([string(credentialsId: "${GIT_CREDENTIALS}", variable: 'GITHUB_TOKEN')]) {
                     sh '''
-                        set -x
-                        git remote set-url origin https://${GITHUB_TOKEN}@github.com/Avsilon/unir_devops_aws.git
-                        git push origin master
+                        git config user.email "ci-jenkins@unir.net"
+                        git config user.name "Jenkins CI Pipeline"
+
+                        git fetch origin
+                        git checkout -B main origin/main
+                        git merge origin/develop --no-edit
+
+                        git remote set-url origin https://${GITHUB_TOKEN}@${GIT_REPO_URL}
+                        git push origin main
                     '''
                 }
             }
