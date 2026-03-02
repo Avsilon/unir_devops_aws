@@ -1,0 +1,124 @@
+pipeline {
+    agent none
+
+    environment {
+        GIT_REPO_URL    = 'github.com/Avsilon/unir_devops_aws.git'
+        GIT_CREDENTIALS = 'github-token'
+        ENVIRONMENT     = 'staging'
+        STACK_NAME      = 'todo-list-aws-staging'
+        AWS_REGION      = 'us-east-1'
+    }
+
+    stages {
+
+        stage('Get Code') {
+            agent any
+            steps {
+                sh 'echo "Ejecutando en: $(hostname) como el usuario: $(whoami)"'
+                echo 'Obteniendo código de la rama develop'
+                git branch: 'develop', url: "https://${GIT_REPO_URL}"
+                stash name: 'source-code', includes: '**/*'
+            }
+        }
+
+        stage('Static Test') {
+            agent { label 'agent-static' }
+            steps {
+                sh 'echo "IDENTIFICACIÓN AGENTE ESTÁTICO: Host: $(hostname) | User: $(whoami)"'
+                unstash 'source-code'
+                echo 'Ejecutando análisis estático (Flake8 y Bandit) sobre src/'
+                sh '''
+                    python3 -m pip install --user flake8 bandit
+                    python3 -m flake8 --exit-zero --format=pylint src/ > flake8-report.out
+                    python3 -m bandit --exit-zero -r src/ -f html -o bandit-report.html
+                '''
+            }
+            post {
+                always {
+                    recordIssues tools: [flake8(name: 'Flake8', pattern: 'flake8-report.out')]
+                    publishHTML target: [
+                        allowMissing:          true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll:              true,
+                        reportDir:            '.',
+                        reportFiles:          'bandit-report.html',
+                        reportName:           'Bandit Security Report'
+                    ]
+                }
+            }
+        }
+
+        stage('Deploy') {
+            agent any
+            steps {
+                sh 'echo "IDENTIFICACIÓN AGENTE DEPLOY: Host: $(hostname) | User: $(whoami)"'
+                unstash 'source-code'
+                echo 'Construyendo y desplegando la aplicación en entorno Staging'
+                sh '''
+                    sam build
+                    sam deploy --config-env staging \
+                        --no-confirm-changeset \
+                        --force-upload \
+                        --no-fail-on-empty-changeset \
+                        --no-progressbar
+                '''
+                script {
+                    def BASE_URL = sh(
+                        script: "aws cloudformation describe-stacks --stack-name ${STACK_NAME} --query 'Stacks[0].Outputs[?OutputKey==`BaseUrlApi`].OutputValue' --region ${AWS_REGION} --output text",
+                        returnStdout: true
+                    ).trim()
+                    echo "BASE_URL obtenida: ${BASE_URL}"
+                    writeFile file: 'base_url.txt', text: BASE_URL
+                }
+                stash name: 'deploy-info', includes: 'base_url.txt'
+            }
+        }
+
+        stage('Rest Test') {
+            agent { label 'agent-rest' }
+            steps {
+                sh 'echo "IDENTIFICACIÓN AGENTE REST API: Host: $(hostname) | User: $(whoami)"'
+                unstash 'source-code'
+                unstash 'deploy-info'
+                echo 'Ejecutando pruebas de integración contra el entorno desplegado'
+                script {
+                    def BASE_URL = readFile('base_url.txt').trim()
+                    echo "BASE_URL: ${BASE_URL}"
+                    sh """
+                        python3 -m pip install --user pytest requests
+                        export BASE_URL=${BASE_URL}
+                        python3 -m pytest -s test/integration/todoApiTest.py
+                    """
+                }
+            }
+        }
+
+        stage('Promote') {
+            agent any
+            steps {
+                sh 'echo "IDENTIFICACIÓN AGENTE PROMOTE: Host: $(hostname) | User: $(whoami)"'
+                unstash 'source-code'
+                echo 'Realizando merge de develop a main...'
+                withCredentials([string(credentialsId: "${GIT_CREDENTIALS}", variable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        git config user.email "ci-jenkins@unir.net"
+                        git config user.name "Jenkins CI Pipeline"
+
+                        git fetch origin
+                        git checkout -B main origin/main
+                        git merge origin/develop --no-edit
+
+                        git remote set-url origin https://${GITHUB_TOKEN}@${GIT_REPO_URL}
+                        git push origin main
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline CI con agentes finalizado'
+        }
+    }
+}

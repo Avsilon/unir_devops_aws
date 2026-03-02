@@ -1,0 +1,74 @@
+pipeline {
+    agent none
+
+    environment {
+        GIT_REPO_URL = 'github.com/Avsilon/unir_devops_aws.git'
+        ENVIRONMENT  = 'production'
+        STACK_NAME   = 'todo-list-aws-production'
+        AWS_REGION   = 'us-east-1'
+    }
+
+    stages {
+
+        stage('Get Code') {
+            agent any
+            steps {
+                sh 'echo "IDENTIFICACIÓN GET CODE: Host: $(hostname) | User: $(whoami)"'
+                echo 'Obteniendo código de la rama main'
+                git branch: 'main', url: "https://${GIT_REPO_URL}"
+                stash name: 'source-code', includes: '**/*'
+            }
+        }
+
+        stage('Deploy') {
+            agent any
+            steps {
+                sh 'echo "IDENTIFICACIÓN DEPLOY PRODUCTION: Host: $(hostname) | User: $(whoami)"'
+                unstash 'source-code'
+                echo 'Construyendo y desplegando la aplicación en entorno Production'
+                sh '''
+                    sam build
+                    sam deploy --config-env production \
+                        --no-confirm-changeset \
+                        --force-upload \
+                        --no-fail-on-empty-changeset \
+                        --no-progressbar
+                '''
+                script {
+                    def BASE_URL = sh(
+                        script: "aws cloudformation describe-stacks --stack-name ${STACK_NAME} --query 'Stacks[0].Outputs[?OutputKey==`BaseUrlApi`].OutputValue' --region ${AWS_REGION} --output text",
+                        returnStdout: true
+                    ).trim()
+                    echo "BASE_URL obtenida: ${BASE_URL}"
+                    writeFile file: 'base_url.txt', text: BASE_URL
+                }
+                stash name: 'deploy-info', includes: 'base_url.txt'
+            }
+        }
+
+        stage('Rest Test') {
+            agent { label 'agent-rest' }
+            steps {
+                sh 'echo "IDENTIFICACIÓN REST TEST (PROD): Host: $(hostname) | User: $(whoami)"'
+                unstash 'source-code'
+                unstash 'deploy-info'
+                echo 'Ejecutando pruebas de integración de solo lectura contra producción'
+                script {
+                    def BASE_URL = readFile('base_url.txt').trim()
+                    echo "BASE_URL: ${BASE_URL}"
+                    sh """
+                        python3 -m pip install --user pytest requests
+                        export BASE_URL=${BASE_URL}
+                        python3 -m pytest -s test/integration/todoApiTestReadOnly.py
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline CD con agentes finalizado'
+        }
+    }
+}
