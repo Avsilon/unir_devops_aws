@@ -1,0 +1,98 @@
+pipeline {
+    agent any
+
+    environment {
+        GIT_REPO_URL    = 'https://github.com/Avsilon/unir_devops_aws.git'
+        GIT_CREDENTIALS = 'github-ssh-creds'
+        ENVIRONMENT     = 'staging'
+        STACK_NAME      = 'todo-list-aws-staging'
+        AWS_REGION      = 'us-east-1'
+    }
+
+    stages {
+        stage('Get Code') {
+            steps {
+                echo 'Obteniendo código de la rama develop'
+                git branch: 'develop', url: "${GIT_REPO_URL}"
+            }
+        }
+        stage('Static Test') {
+            steps {
+                echo 'Ejecutando análisis estático (Flake8 y Bandit) sobre src/'
+                sh '''
+                    python3 -m pip install flake8 bandit
+                    # Flake8: informe en formato pylint para el plugin Warnings Next Generation
+                    flake8 --exit-zero --format=pylint src/ > flake8-report.out
+                    # Bandit: informe en formato HTML para publicación visual
+                    bandit --exit-zero -r src/ -f html -o bandit-report.html
+                '''
+            }
+            post {
+                always {
+                    recordIssues tools: [flake8(name: 'Flake8', pattern: 'flake8-report.out')]
+                    publishHTML target: [
+                        allowMissing:          true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll:              true,
+                        reportDir:            '.',
+                        reportFiles:          'bandit-report.html',
+                        reportName:           'Bandit Security Report'
+                    ]
+                }
+            }
+        }
+        stage('Deploy') {
+            steps {
+                echo 'Construyendo y desplegando la aplicación en entorno Staging'
+                sh '''
+                    sam build
+                    sam deploy --config-env staging \
+                        --no-confirm-changeset \
+                        --force-upload \
+                        --no-fail-on-empty-changeset \
+                        --no-progressbar
+                '''
+            }
+        }
+        stage('Rest Test') {
+            steps {
+                echo 'Ejecutando pruebas de integración contra el entorno desplegado'
+                script {
+                    def BASE_URL = sh(
+                        script: "aws cloudformation describe-stacks --stack-name ${STACK_NAME} --query 'Stacks[0].Outputs[?OutputKey==`BaseUrlApi`].OutputValue' --region ${AWS_REGION} --output text",
+                        returnStdout: true
+                    ).trim()
+                    echo "BASE_URL: ${BASE_URL}"
+                    sh """
+                        python3 -m pip install pytest requests
+                        export BASE_URL=${BASE_URL}
+                        pytest -s test/integration/todoApiTest.py
+                    """
+                }
+            }
+        }
+        stage('Promote') {
+            steps {
+                echo 'Realizando merge de develop a master'
+                sh '''
+                    git config user.email "jenkins@example.com"
+                    git config user.name "Jenkins CI"
+                    git branch -a
+                    git checkout -b develop origin/develop || true
+                    git checkout -b master origin/master
+                    git merge develop --no-edit
+                '''
+                sshagent(["${GIT_CREDENTIALS}"]) {
+                    sh 'git push origin master'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Limpiando workspace'
+            cleanWs()
+        }
+    }
+}
