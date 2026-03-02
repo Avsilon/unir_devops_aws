@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         GIT_REPO_URL    = 'https://github.com/Avsilon/unir_devops_aws.git'
-        GIT_CREDENTIALS = 'github-ssh-creds'
+        GIT_CREDENTIALS = 'github-token'
         ENVIRONMENT     = 'staging'
         STACK_NAME      = 'todo-list-aws-staging'
         AWS_REGION      = 'us-east-1'
@@ -75,15 +75,19 @@ pipeline {
             steps {
                 echo 'Realizando merge de develop a master'
                 sh '''
-                    git config user.email "jenkins@example.com"
-                    git config user.name "Jenkins CI"
+                    git config user.email "albama4c@gmail.com"
+                    git config user.name "Avsilon"
                     git branch -a
                     git checkout -b develop origin/develop || true
                     git checkout -b master origin/master
                     git merge develop --no-edit
                 '''
-                sshagent(["${GIT_CREDENTIALS}"]) {
-                    sh 'git push origin master'
+                withCredentials([string(credentialsId: "${GIT_CREDENTIALS}", variable: 'GITHUB_TOKEN')]) {
+                    sh '''
+                        set -x
+                        git remote set-url origin https://${GITHUB_TOKEN}@github.com/Avsilon/unir_devops_aws.git
+                        git push origin master
+                    '''
                 }
             }
         }
